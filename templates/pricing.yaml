@@ -1,0 +1,17 @@
+# Token Budgeting Reference Pricing
+# Used as fallbacks for zero-config operation.
+Tiers:
+  default: 2
+  elite: 1
+  utility: 3
+
+Default_Prices:
+  tier_1: 3.00  # per 1M tokens
+  tier_2: 1.00  # per 1M tokens
+  tier_3: 0.00   # Local/Free
+
+Provider_Defaults:
+  openrouter: "prepaid"
+  anthropic: "monthly"
+  google: "free-tier"
+  ollama: "local"
