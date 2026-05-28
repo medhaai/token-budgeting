@@ -72,6 +72,7 @@ Default columns:
 
 - provider
 - model
+- enabled
 - sessions
 - api_calls
 - input
@@ -80,6 +81,8 @@ Default columns:
 - reasoning
 - total
 - est_usd
+
+The default report includes configured providers even when usage is zero, using Hermes config/auth/.env metadata without exposing secrets. Provider/model display aliases normalize known label issues, e.g. local `custom` Ollama rows display as `ollama`, and the stale `openai-codex|gemma4:31b-cloud` state label displays as `gpt-5.5`.
 
 This is the preferred quick answer when the user asks: "what does token budget usage look like?"
 
@@ -91,6 +94,7 @@ python3 scripts/cli.py report --period daily
 python3 scripts/cli.py status                  # verified budgets only
 python3 scripts/cli.py questions               # what budget facts to ask/verify
 python3 scripts/cli.py subscriptions           # verified subscription sources
+python3 scripts/cli.py enabled                 # configured providers/models incl. zero usage
 python3 scripts/cli.py finance --by provider --period daily
 python3 scripts/cli.py finance --by model --period daily
 python3 scripts/cli.py providers --period daily
@@ -122,6 +126,7 @@ Files:
 - `subscriptions.yaml`: verified provider plan/reset/allowance/spend-cap facts.
 - `pricing.yaml`: provider/model price estimates per 1M tokens.
 - `model_tiers.yaml`: substring mappings from model names to tiers.
+- `model_aliases.yaml`: display corrections for stale/generic provider and model labels.
 
 Templates live in this skill repo under `templates/`.
 

@@ -104,6 +104,7 @@ def main() -> None:
     budget.add_argument("--limit-usd", type=float)
 
     subparsers.add_parser("doctor", help="Check local setup")
+    subparsers.add_parser("enabled", help="Show configured providers/models, including unused")
     subparsers.add_parser("subscriptions", help="Show verified subscription/budget sources")
     subparsers.add_parser("questions", help="Show budget questions the AI should ask/verify")
 
@@ -113,7 +114,7 @@ def main() -> None:
     command = args.command or "report"
 
     if command == "report":
-        print_table(ledger.default_report(args.period), ["provider", "model", "sessions", "api_calls", "input", "output", "cache_read", "reasoning", "total", "est_usd"])
+        print_table(ledger.default_report(args.period), ["provider", "model", "enabled", "sessions", "api_calls", "input", "output", "cache_read", "reasoning", "total", "est_usd"])
     elif command == "status":
         rows = ledger.budget_status(args.period)
         if rows:
@@ -153,6 +154,8 @@ def main() -> None:
     elif command == "doctor":
         rows = [{"check": c, "status": s, "detail": d} for c, s, d in ledger.doctor()]
         print_table(rows, ["check", "status", "detail"])
+    elif command == "enabled":
+        print_table(ledger.enabled_providers(), ["provider", "model", "enabled", "source"])
     elif command == "subscriptions":
         print_table(ledger.subscriptions(), ["provider", "plan", "reset_period", "included_tokens", "monthly_usd_budget", "verified", "source"], empty="No verified subscriptions configured.")
     elif command == "questions":

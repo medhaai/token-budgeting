@@ -1,5 +1,7 @@
 import csv
+import json
 import os
+import re
 import sqlite3
 import time
 from datetime import datetime, timedelta
@@ -39,6 +41,11 @@ class TokenLedger:
         self.subscriptions_path = self.config_dir / "subscriptions.yaml"
         self.pricing_path = self.config_dir / "pricing.yaml"
         self.model_tiers_path = self.config_dir / "model_tiers.yaml"
+        self.model_aliases_path = self.config_dir / "model_aliases.yaml"
+        self.hermes_home = Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser()
+        self.hermes_config_path = self.hermes_home / "config.yaml"
+        self.hermes_auth_path = self.hermes_home / "auth.json"
+        self.hermes_env_path = self.hermes_home / ".env"
         self._init_config()
 
     # ------------------------------------------------------------------
@@ -100,6 +107,21 @@ class TokenLedger:
                         "utility": ["gemma", "llama", "ollama", "mini", "local"],
                     },
                     "default_tier": "balanced",
+                },
+            )
+        if not self.model_aliases_path.exists():
+            self._write_yaml(
+                self.model_aliases_path,
+                {
+                    "provider_aliases": {
+                        "custom|http://127.0.0.1:11434/v1": "ollama",
+                        "ollama-launch": "ollama",
+                        "gemini": "google",
+                    },
+                    "model_aliases": {
+                        "openai-codex|gemma4:31b-cloud": "gpt-5.5",
+                    },
+                    "notes": "Aliases correct Hermes state rows when provider/model labels are stale after a runtime model switch. Keep evidence in git history or session notes.",
                 },
             )
 
@@ -181,6 +203,8 @@ class TokenLedger:
                     COALESCE(api_call_count, 0) AS api_call_count,
                     COALESCE(estimated_cost_usd, 0.0) AS estimated_cost_usd,
                     COALESCE(actual_cost_usd, 0.0) AS actual_cost_usd,
+                    COALESCE(billing_base_url, '') AS billing_base_url,
+                    COALESCE(billing_mode, '') AS billing_mode,
                     started_at,
                     ended_at,
                     title
@@ -194,6 +218,33 @@ class TokenLedger:
     # ------------------------------------------------------------------
     # Normalization / pricing
     # ------------------------------------------------------------------
+    def display_provider(self, row_or_provider: Any, base_url: str = "") -> str:
+        cfg = self._read_yaml(self.model_aliases_path)
+        if isinstance(row_or_provider, sqlite3.Row):
+            provider = row_or_provider["provider"] or "unknown"
+            base_url = row_or_provider["billing_base_url"] or ""
+        else:
+            provider = str(row_or_provider or "unknown")
+        aliases = cfg.get("provider_aliases", {}) or {}
+        if f"{provider}|{base_url}" in aliases:
+            return aliases[f"{provider}|{base_url}"]
+        if provider in aliases:
+            return aliases[provider]
+        if provider == "custom" and "127.0.0.1:11434" in base_url:
+            return "ollama"
+        return provider
+
+    def display_model(self, row_or_model: Any, provider: Optional[str] = None) -> str:
+        cfg = self._read_yaml(self.model_aliases_path)
+        if isinstance(row_or_model, sqlite3.Row):
+            raw_model = row_or_model["model"] or "unknown"
+            raw_provider = row_or_model["provider"] or provider or "unknown"
+        else:
+            raw_model = str(row_or_model or "unknown")
+            raw_provider = provider or "unknown"
+        aliases = cfg.get("model_aliases", {}) or {}
+        return aliases.get(f"{raw_provider}|{raw_model}", aliases.get(raw_model, raw_model))
+
     def tier_for_model(self, model: Optional[str]) -> str:
         model_l = (model or "unknown").lower()
         cfg = self._read_yaml(self.model_tiers_path)
@@ -247,12 +298,14 @@ class TokenLedger:
         rows = self._usage_rows(self._window_start(period))
         groups: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
         for row in rows:
-            tier = self.tier_for_model(row["model"])
+            display_provider = self.display_provider(row)
+            display_model = self.display_model(row)
+            tier = self.tier_for_model(display_model)
             key: Tuple[Any, ...]
             if group_by == "provider":
-                key = (row["provider"],)
+                key = (display_provider,)
             elif group_by == "model":
-                key = (row["provider"], row["model"] or "unknown")
+                key = (display_provider, display_model)
             elif group_by == "tier":
                 key = (tier,)
             elif group_by == "source":
@@ -283,7 +336,63 @@ class TokenLedger:
             item["est_usd"] += self.estimated_cost(row)
         return sorted(groups.values(), key=lambda x: x["total"], reverse=True)
 
-    def default_report(self, period: str = "daily") -> List[Dict[str, Any]]:
+    def enabled_providers(self) -> List[Dict[str, Any]]:
+        """Configured providers, including providers with zero usage."""
+        found: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+        def add(provider: str, model: str = "(configured)", source: str = "config") -> None:
+            provider = self.display_provider(provider)
+            key = (provider, model or "(configured)")
+            found.setdefault(key, {"provider": provider, "model": model or "(configured)", "enabled": "yes", "source": source})
+
+        if self.hermes_config_path.exists():
+            cfg = self._read_yaml(self.hermes_config_path)
+            model_cfg = cfg.get("model", {}) or {}
+            if model_cfg.get("provider"):
+                add(str(model_cfg.get("provider")), str(model_cfg.get("default") or "(configured)"), "config.model")
+            providers = cfg.get("providers", {}) or {}
+            for name, pdata in providers.items():
+                models = pdata.get("models") or [pdata.get("default_model") or "(configured)"] if isinstance(pdata, dict) else ["(configured)"]
+                for model in models:
+                    add(str(name), str(model or "(configured)"), "config.providers")
+
+        if self.hermes_auth_path.exists():
+            try:
+                auth = json.loads(self.hermes_auth_path.read_text())
+                providers = auth.get("providers", {}) or {}
+                for provider in providers.keys():
+                    add(str(provider), "(configured)", "auth")
+                pool = auth.get("credential_pool", {}) or {}
+                for provider, creds in pool.items():
+                    if creds:
+                        add(str(provider), "(configured)", "auth_pool")
+            except Exception:
+                pass
+
+        env_map = {
+            "OPENROUTER_API_KEY": "openrouter",
+            "ANTHROPIC_API_KEY": "anthropic",
+            "OPENAI_API_KEY": "openai",
+            "GOOGLE_API_KEY": "google",
+            "GEMINI_API_KEY": "google",
+            "DEEPSEEK_API_KEY": "deepseek",
+            "XAI_API_KEY": "xai",
+            "HF_TOKEN": "huggingface",
+            "GLM_API_KEY": "zai/glm",
+            "MINIMAX_API_KEY": "minimax",
+            "KIMI_API_KEY": "kimi",
+            "DASHSCOPE_API_KEY": "dashscope",
+            "GROQ_API_KEY": "groq",
+            "MISTRAL_API_KEY": "mistral",
+        }
+        if self.hermes_env_path.exists():
+            for line in self.hermes_env_path.read_text().splitlines():
+                match = re.match(r"\s*([A-Z0-9_]+)\s*=\s*(.+)", line)
+                if match and match.group(1) in env_map and match.group(2).strip().strip("'\""):
+                    add(env_map[match.group(1)], "(configured)", ".env")
+        return sorted(found.values(), key=lambda r: (r["provider"], r["model"]))
+
+    def default_report(self, period: str = "daily", include_unused: bool = True) -> List[Dict[str, Any]]:
         """Default concise view: provider, model, sessions, calls, tokens, cost."""
         rows = self.summarize(period, "model")
         out: List[Dict[str, Any]] = []
@@ -295,6 +404,7 @@ class TokenLedger:
                 {
                     "provider": provider,
                     "model": model,
+                    "enabled": "yes",
                     "sessions": row["sessions"],
                     "api_calls": row["api_calls"],
                     "input": row["input"],
@@ -305,7 +415,28 @@ class TokenLedger:
                     "est_usd": row["est_usd"],
                 }
             )
-        return out
+        if include_unused:
+            used = {(row["provider"], row["model"]) for row in out}
+            for provider in self.enabled_providers():
+                key = (provider["provider"], provider["model"])
+                if key in used:
+                    continue
+                out.append(
+                    {
+                        "provider": provider["provider"],
+                        "model": provider["model"],
+                        "enabled": provider["enabled"],
+                        "sessions": 0,
+                        "api_calls": 0,
+                        "input": 0,
+                        "output": 0,
+                        "cache_read": 0,
+                        "reasoning": 0,
+                        "total": 0,
+                        "est_usd": 0.0,
+                    }
+                )
+        return sorted(out, key=lambda x: (x["total"] == 0, x["provider"], x["model"]))
 
     def top_sessions(self, period: str = "daily", limit: int = 10) -> List[Dict[str, Any]]:
         out = []
@@ -313,8 +444,8 @@ class TokenLedger:
             out.append(
                 {
                     "started": datetime.fromtimestamp(row["started_at"]).strftime("%Y-%m-%d %H:%M"),
-                    "provider": row["provider"],
-                    "model": row["model"] or "unknown",
+                    "provider": self.display_provider(row),
+                    "model": self.display_model(row),
                     "source": row["source"] or "unknown",
                     "api_calls": int(row["api_call_count"] or 0),
                     "tokens": self.total_tokens(row),
@@ -339,11 +470,11 @@ class TokenLedger:
             for row in rows:
                 if scope == "global":
                     matched.append(row)
-                elif scope == "provider" and row["provider"] == name:
+                elif scope == "provider" and self.display_provider(row) == name:
                     matched.append(row)
-                elif scope == "model" and row["model"] == name:
+                elif scope == "model" and self.display_model(row) == name:
                     matched.append(row)
-                elif scope == "tier" and self.tier_for_model(row["model"]) == name:
+                elif scope == "tier" and self.tier_for_model(self.display_model(row)) == name:
                     matched.append(row)
                 elif scope == "source" and (row["source"] or "unknown") == name:
                     matched.append(row)
@@ -488,7 +619,7 @@ class TokenLedger:
         has_budget = bool(budget_cfg.get("budgets"))
         has_verified_sub = any(s.get("verified") and (s.get("included_tokens") or s.get("monthly_usd_budget")) for s in (sub_cfg.get("subscriptions", []) or []))
         checks.append(("budget_config", "OK" if has_budget or has_verified_sub else "VERIFY", "No verified budget/subscription limits configured" if not (has_budget or has_verified_sub) else "verified limits present"))
-        for name, path in [("budgets", self.budgets_path), ("subscriptions", self.subscriptions_path), ("pricing", self.pricing_path), ("model_tiers", self.model_tiers_path)]:
+        for name, path in [("budgets", self.budgets_path), ("subscriptions", self.subscriptions_path), ("pricing", self.pricing_path), ("model_tiers", self.model_tiers_path), ("model_aliases", self.model_aliases_path)]:
             checks.append((name, "OK" if path.exists() else "FAIL", str(path)))
         return checks
 

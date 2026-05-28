@@ -1,0 +1,17 @@
+# Display aliases for provider/model labels.
+#
+# These correct Hermes state rows when provider/model labels are stale or too
+# generic for reporting. Matching is exact unless the code has a built-in rule.
+
+provider_aliases:
+  custom|http://127.0.0.1:11434/v1: ollama
+  ollama-launch: ollama
+  gemini: google
+
+model_aliases:
+  # Verified from the active Hermes/Codex runtime note: this session was switched
+  # to gpt-5.5 via OpenAI Codex while state.db retained the previous configured
+  # model label gemma4:31b-cloud.
+  openai-codex|gemma4:31b-cloud: gpt-5.5
+
+notes: Keep aliases narrow. Prefer fixing Hermes state capture upstream when possible.
