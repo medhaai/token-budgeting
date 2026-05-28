@@ -35,9 +35,9 @@ def print_table(rows: List[Dict[str, Any]], columns: List[str], empty: str = "No
         rendered = []
         for col in columns:
             val = row.get(col, "")
-            if col in {"input", "output", "cache_read", "reasoning", "total", "tokens", "api_calls", "sessions"}:
+            if col in {"input", "output", "cache_read", "reasoning", "total", "tokens", "api_calls", "sessions", "recent_tokens", "included_tokens"}:
                 val = fmt_int(val)
-            elif col in {"est_usd", "usd_24h", "projected_monthly_usd"}:
+            elif col in {"est_usd", "usd_24h", "projected_monthly_usd", "recent_est_usd", "monthly_usd_budget"}:
                 val = fmt_usd(val)
             elif col in {"tokens_per_hour"}:
                 val = fmt_int(round(float(val)))
@@ -67,9 +67,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Hermes token budget reports")
     parser.add_argument("--state-db", default="~/.hermes/state.db", help="Hermes state.db path")
     parser.add_argument("--config-dir", default="~/.hermes/token_budgeting", help="Token budgeting config directory")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument("--period", choices=["daily", "weekly", "monthly", "all"], default="daily", help="Default report period")
+    subparsers = parser.add_subparsers(dest="command")
 
-    status = subparsers.add_parser("status", help="Budget status table")
+    report = subparsers.add_parser("report", help="Default provider/model usage table")
+    report.add_argument("--period", choices=["daily", "weekly", "monthly", "all"], default="daily")
+
+    status = subparsers.add_parser("status", help="Verified budget/subscription status")
     status.add_argument("--period", choices=["daily", "weekly", "monthly"], default="daily")
 
     finance = subparsers.add_parser("finance", help="Provider/model spend table")
@@ -100,12 +104,22 @@ def main() -> None:
     budget.add_argument("--limit-usd", type=float)
 
     subparsers.add_parser("doctor", help="Check local setup")
+    subparsers.add_parser("subscriptions", help="Show verified subscription/budget sources")
+    subparsers.add_parser("questions", help="Show budget questions the AI should ask/verify")
 
     args = parser.parse_args()
     ledger = TokenLedger(state_db=args.state_db, config_dir=args.config_dir)
 
-    if args.command == "status":
-        print_table(ledger.budget_status(args.period), ["scope", "name", "period", "used", "limit", "unit", "pct", "status"])
+    command = args.command or "report"
+
+    if command == "report":
+        print_table(ledger.default_report(args.period), ["provider", "model", "sessions", "api_calls", "input", "output", "cache_read", "reasoning", "total", "est_usd"])
+    elif command == "status":
+        rows = ledger.budget_status(args.period)
+        if rows:
+            print_table(rows, ["scope", "name", "period", "used", "limit", "unit", "pct", "status"])
+        else:
+            print("No verified budget configured for this period. Use `questions` to see what to verify.")
     elif args.command == "finance":
         print_table(ledger.summarize(args.period, args.by), ["scope", "sessions", "api_calls", "input", "output", "cache_read", "reasoning", "total", "est_usd"])
     elif args.command == "forecast":
@@ -136,9 +150,13 @@ def main() -> None:
     elif args.command == "set-budget":
         ledger.set_budget(args.scope, args.name, args.period, args.limit_tokens, args.limit_usd)
         print(f"Updated budget: scope={args.scope} name={args.name} period={args.period}")
-    elif args.command == "doctor":
+    elif command == "doctor":
         rows = [{"check": c, "status": s, "detail": d} for c, s, d in ledger.doctor()]
         print_table(rows, ["check", "status", "detail"])
+    elif command == "subscriptions":
+        print_table(ledger.subscriptions(), ["provider", "plan", "reset_period", "included_tokens", "monthly_usd_budget", "verified", "source"], empty="No verified subscriptions configured.")
+    elif command == "questions":
+        print_table(ledger.budget_questions(), ["provider", "question", "recent_tokens", "recent_est_usd"], empty="No budget questions; subscription/budget sources are configured.")
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 name: token-budgeting
 category: devops
 description: Passive token finance and budget reports over Hermes' built-in state.db usage ledger.
-version: 2.0.0
+version: 2.1.0
 author: User & Hermes
 ---
 
@@ -16,7 +16,18 @@ Hermes already records raw usage in:
 ~/.hermes/state.db
 ```
 
-This skill treats that SQLite database as the source of truth. It does not duplicate every request into a separate CSV ledger. Its job is to turn Hermes' raw session data into simple, clean tabular reports: budgets, spend, burn rate, provider/model breakdowns, and passive alerts.
+This skill treats that SQLite database as the source of truth. It does not duplicate every request into a separate CSV ledger.
+
+## Core Rule: No Arbitrary Budgets
+
+Do not invent a default token or dollar budget. Budgets must come from one of:
+
+- provider subscription limits
+- provider dashboard / invoice data
+- user-confirmed monthly spend cap
+- user-confirmed token allowance
+
+If budget/subscription information is missing, report usage only and ask/verify the needed budget facts before claiming OK/WARNING/CRITICAL.
 
 ## What Hermes Core Owns
 
@@ -38,25 +49,48 @@ Hermes core captures raw session usage in the `sessions` table:
 - `started_at`
 - `ended_at`
 
-Do not reimplement basic token capture in this skill unless Hermes core is unavailable.
-
 ## What This Skill Adds
 
-- Budget policy by global/provider/model/tier/source.
-- Clean tabular reports for status, finance, providers, models, tiers, sessions, and forecasts.
+- Clean default provider/model usage report.
+- Budget policy by global/provider/model/tier/source, but only when verified.
+- Subscription-aware budget verification prompts.
 - Pricing normalization for providers and models.
 - Specialist tiering: elite / balanced / utility / local.
-- Burn-rate forecasting: tokens/hour, projected monthly spend, and time-to-budget exhaustion.
-- Passive alert state: OK / WARNING / CRITICAL. The skill reports; it does not hard-block usage.
+- Burn-rate forecasting: tokens/hour and projected monthly spend.
+- Passive alert state: OK / WARNING / CRITICAL only for verified budgets.
 - Setup diagnostics via `doctor`.
+
+## Default View
+
+The default command should show a simple terminal-friendly table grouped by provider and model:
+
+```bash
+python3 scripts/cli.py
+```
+
+Default columns:
+
+- provider
+- model
+- sessions
+- api_calls
+- input
+- output
+- cache_read
+- reasoning
+- total
+- est_usd
+
+This is the preferred quick answer when the user asks: "what does token budget usage look like?"
 
 ## Commands
 
-Run from the skill repo or installed skill directory:
-
 ```bash
-python3 scripts/cli.py doctor
-python3 scripts/cli.py status
+python3 scripts/cli.py                         # default provider/model report
+python3 scripts/cli.py report --period daily
+python3 scripts/cli.py status                  # verified budgets only
+python3 scripts/cli.py questions               # what budget facts to ask/verify
+python3 scripts/cli.py subscriptions           # verified subscription sources
 python3 scripts/cli.py finance --by provider --period daily
 python3 scripts/cli.py finance --by model --period daily
 python3 scripts/cli.py providers --period daily
@@ -64,20 +98,14 @@ python3 scripts/cli.py models --period daily
 python3 scripts/cli.py tiers --period daily
 python3 scripts/cli.py sessions --period daily --limit 10
 python3 scripts/cli.py forecast --period daily
+python3 scripts/cli.py doctor
 ```
 
-Set budgets:
+Set verified budgets only after asking/checking source data:
 
 ```bash
-python3 scripts/cli.py set-budget --scope global --name default --period daily --limit-tokens 1000000
 python3 scripts/cli.py set-budget --scope provider --name openai-codex --period daily --limit-usd 5
 python3 scripts/cli.py set-budget --scope tier --name elite --period daily --limit-tokens 500000
-```
-
-Use a non-default Hermes state database:
-
-```bash
-python3 scripts/cli.py --state-db /path/to/state.db status
 ```
 
 ## Config Files
@@ -90,29 +118,27 @@ Runtime config is created under:
 
 Files:
 
-- `budgets.yaml`: budget rules and thresholds.
+- `budgets.yaml`: verified budget rules and thresholds. Starts empty; no arbitrary default.
+- `subscriptions.yaml`: verified provider plan/reset/allowance/spend-cap facts.
 - `pricing.yaml`: provider/model price estimates per 1M tokens.
 - `model_tiers.yaml`: substring mappings from model names to tiers.
 
 Templates live in this skill repo under `templates/`.
 
-## Report Style
+## Budget Verification Workflow
 
-Reports should be terminal-friendly tables: no verbose prose, no charts required, easy to paste into WhatsApp or a terminal.
+When no verified budget exists:
 
-Important columns:
-
-- scope
-- sessions
-- api_calls
-- input
-- output
-- cache_read
-- reasoning
-- total
-- est_usd
-- pct
-- status
+1. Run `python3 scripts/cli.py` to report actual usage.
+2. Run `python3 scripts/cli.py questions` to list providers that need verification.
+3. Ask the user or check provider dashboards/invoices for:
+   - provider/subscription plan
+   - reset period
+   - included token allowance, if any
+   - monthly USD cap or expected spend
+   - whether local/custom providers should be treated as zero-cost, fixed-cost, or capped
+4. Record only verified values in `subscriptions.yaml` or with `set-budget`.
+5. Then use `status` for OK/WARNING/CRITICAL.
 
 ## Architecture
 
@@ -123,7 +149,7 @@ Hermes core
 
 Token-budgeting skill
   -> reads state.db
-  -> applies budgets.yaml + pricing.yaml + model_tiers.yaml
+  -> applies verified budgets/subscriptions + pricing + model tiers
   -> prints clean passive reports
 ```
 
@@ -143,20 +169,9 @@ Optional/future analytics:
 python3 -m pip install duckdb PyYAML
 ```
 
-## Redundant Pieces Removed / Deprecated
+## Deprecated
 
 - `usage.csv` is not the primary ledger.
 - CSV append logging is deprecated.
 - The adapter is retained only as a backward-compatible no-op for old Hermes soft-hook imports.
 - CSV locking concerns are no longer central because Hermes state is SQLite.
-
-## Verification
-
-```bash
-python3 scripts/cli.py doctor
-python3 scripts/cli.py status
-python3 scripts/cli.py providers --period daily
-python3 scripts/cli.py sessions --period daily --limit 5
-```
-
-Expected: simple tables, no tracebacks.

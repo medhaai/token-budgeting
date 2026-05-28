@@ -1,0 +1,17 @@
+# Verified subscription and budget sources.
+#
+# Do not guess these values. Leave unknown values null until the user or provider
+# dashboard/invoice verifies them. Agents may ask the user to confirm missing
+# plan/reset/budget details before making budget claims.
+
+subscriptions: []
+
+# Example:
+# subscriptions:
+#   - provider: openai-codex
+#     plan: Team
+#     reset_period: monthly
+#     included_tokens: null
+#     monthly_usd_budget: 50
+#     verified: true
+#     source: user confirmed 2026-05-28

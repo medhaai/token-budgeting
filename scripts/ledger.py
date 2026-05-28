@@ -36,6 +36,7 @@ class TokenLedger:
         self.config_dir = Path(config_dir).expanduser()
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.budgets_path = self.config_dir / "budgets.yaml"
+        self.subscriptions_path = self.config_dir / "subscriptions.yaml"
         self.pricing_path = self.config_dir / "pricing.yaml"
         self.model_tiers_path = self.config_dir / "model_tiers.yaml"
         self._init_config()
@@ -48,16 +49,28 @@ class TokenLedger:
             self._write_yaml(
                 self.budgets_path,
                 {
-                    "budgets": [
-                        {
-                            "scope": "global",
-                            "name": "default",
-                            "period": "daily",
-                            "limit_tokens": 1_000_000,
-                            "limit_usd": None,
-                        }
-                    ],
+                    "budgets": [],
                     "thresholds": {"warning_pct": 80, "critical_pct": 95},
+                    "notes": "No arbitrary default budget. Add verified provider/model/tier budgets only after checking subscription limits, invoices, or user-confirmed spend caps.",
+                },
+            )
+        else:
+            self._remove_placeholder_default_budget()
+        if not self.subscriptions_path.exists():
+            self._write_yaml(
+                self.subscriptions_path,
+                {
+                    "subscriptions": [],
+                    "notes": "Add verified subscription details here. Unknown limits should remain null, not guessed.",
+                    "example": {
+                        "provider": "openai-codex",
+                        "plan": "Team/Pro/API/etc",
+                        "reset_period": "monthly",
+                        "included_tokens": None,
+                        "monthly_usd_budget": None,
+                        "verified": False,
+                        "source": "user/provider dashboard/invoice",
+                    },
                 },
             )
         if not self.pricing_path.exists():
@@ -106,6 +119,29 @@ class TokenLedger:
             return
         with open(path, "w", encoding="utf-8") as f:
             yaml.safe_dump(data, f, sort_keys=False)
+
+    def _remove_placeholder_default_budget(self) -> None:
+        """Remove the old generated 1M/day default if it is the only budget.
+
+        This avoids presenting an arbitrary number as a real budget. User- or
+        subscription-verified budgets are preserved.
+        """
+        cfg = self._read_yaml(self.budgets_path)
+        budgets = cfg.get("budgets", []) or []
+        if len(budgets) != 1:
+            return
+        budget = budgets[0]
+        is_placeholder = (
+            budget.get("scope") == "global"
+            and budget.get("name") == "default"
+            and budget.get("period") == "daily"
+            and int(budget.get("limit_tokens") or 0) == 1_000_000
+            and not budget.get("limit_usd")
+        )
+        if is_placeholder:
+            cfg["budgets"] = []
+            cfg["notes"] = "Removed old generated 1M/day placeholder. Add only verified subscription/user-confirmed budgets."
+            self._write_yaml(self.budgets_path, cfg)
 
     # ------------------------------------------------------------------
     # Hermes state access
@@ -247,6 +283,30 @@ class TokenLedger:
             item["est_usd"] += self.estimated_cost(row)
         return sorted(groups.values(), key=lambda x: x["total"], reverse=True)
 
+    def default_report(self, period: str = "daily") -> List[Dict[str, Any]]:
+        """Default concise view: provider, model, sessions, calls, tokens, cost."""
+        rows = self.summarize(period, "model")
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            parts = str(row["scope"]).split(" / ", 1)
+            provider = parts[0]
+            model = parts[1] if len(parts) > 1 else "unknown"
+            out.append(
+                {
+                    "provider": provider,
+                    "model": model,
+                    "sessions": row["sessions"],
+                    "api_calls": row["api_calls"],
+                    "input": row["input"],
+                    "output": row["output"],
+                    "cache_read": row["cache_read"],
+                    "reasoning": row["reasoning"],
+                    "total": row["total"],
+                    "est_usd": row["est_usd"],
+                }
+            )
+        return out
+
     def top_sessions(self, period: str = "daily", limit: int = 10) -> List[Dict[str, Any]]:
         out = []
         for row in self._usage_rows(self._window_start(period))[:5000]:
@@ -375,6 +435,42 @@ class TokenLedger:
             budgets.append(new_budget)
         self._write_yaml(self.budgets_path, cfg)
 
+    def subscriptions(self) -> List[Dict[str, Any]]:
+        cfg = self._read_yaml(self.subscriptions_path)
+        rows = []
+        for sub in cfg.get("subscriptions", []) or []:
+            rows.append(
+                {
+                    "provider": sub.get("provider", "unknown"),
+                    "plan": sub.get("plan", "unknown"),
+                    "reset_period": sub.get("reset_period", "unknown"),
+                    "included_tokens": sub.get("included_tokens") or "unknown",
+                    "monthly_usd_budget": sub.get("monthly_usd_budget") or "unknown",
+                    "verified": bool(sub.get("verified", False)),
+                    "source": sub.get("source", "unknown"),
+                }
+            )
+        return rows
+
+    def budget_questions(self) -> List[Dict[str, Any]]:
+        providers = self.summarize("monthly", "provider")
+        configured = {row.get("provider") for row in self.subscriptions()}
+        questions = []
+        for row in providers:
+            provider = row["scope"]
+            if row["total"] <= 0:
+                continue
+            if provider not in configured:
+                questions.append(
+                    {
+                        "provider": provider,
+                        "question": "Verify subscription/plan, reset period, included tokens or monthly USD cap.",
+                        "recent_tokens": row["total"],
+                        "recent_est_usd": row["est_usd"],
+                    }
+                )
+        return questions
+
     def doctor(self) -> List[Tuple[str, str, str]]:
         checks: List[Tuple[str, str, str]] = []
         checks.append(("state_db", "OK" if self.state_db.exists() else "FAIL", str(self.state_db)))
@@ -387,7 +483,12 @@ class TokenLedger:
             checks.append(("sessions_schema", "OK" if not missing else "FAIL", "missing: " + ", ".join(missing) if missing else "required usage columns present"))
         except Exception as exc:
             checks.append(("sessions_schema", "FAIL", str(exc)))
-        for name, path in [("budgets", self.budgets_path), ("pricing", self.pricing_path), ("model_tiers", self.model_tiers_path)]:
+        budget_cfg = self._read_yaml(self.budgets_path)
+        sub_cfg = self._read_yaml(self.subscriptions_path)
+        has_budget = bool(budget_cfg.get("budgets"))
+        has_verified_sub = any(s.get("verified") and (s.get("included_tokens") or s.get("monthly_usd_budget")) for s in (sub_cfg.get("subscriptions", []) or []))
+        checks.append(("budget_config", "OK" if has_budget or has_verified_sub else "VERIFY", "No verified budget/subscription limits configured" if not (has_budget or has_verified_sub) else "verified limits present"))
+        for name, path in [("budgets", self.budgets_path), ("subscriptions", self.subscriptions_path), ("pricing", self.pricing_path), ("model_tiers", self.model_tiers_path)]:
             checks.append((name, "OK" if path.exists() else "FAIL", str(path)))
         return checks
 
