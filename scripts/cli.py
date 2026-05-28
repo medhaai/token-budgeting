@@ -1,34 +1,145 @@
 import argparse
-import sys
+from typing import Any, Dict, Iterable, List
+
 from ledger import TokenLedger
 
-def main():
-    parser = argparse.ArgumentParser(description="Hermes Token Treasury CLI")
-    subparsers = parser.add_subparsers(dest="command")
 
-    subparsers.add_parser("status")
-    subparsers.add_parser("forecast")
-    subparsers.add_parser("finance")
-    
-    budget_parser = subparsers.add_parser("set-budget")
-    budget_parser.add_argument("--model", default="default")
-    budget_parser.add_argument("--period", required=True, choices=["daily", "weekly", "monthly"])
-    budget_parser.add_argument("--limit", type=int, required=True)
+def fmt_int(value: Any) -> str:
+    try:
+        return f"{int(value):,}"
+    except Exception:
+        return str(value)
+
+
+def fmt_float(value: Any, digits: int = 2) -> str:
+    try:
+        return f"{float(value):,.{digits}f}"
+    except Exception:
+        return str(value)
+
+
+def fmt_usd(value: Any) -> str:
+    try:
+        return f"${float(value):,.4f}"
+    except Exception:
+        return str(value)
+
+
+def print_table(rows: List[Dict[str, Any]], columns: List[str], empty: str = "No rows.") -> None:
+    if not rows:
+        print(empty)
+        return
+    labels = {col: col.replace("_", " ").title() for col in columns}
+    table = []
+    for row in rows:
+        rendered = []
+        for col in columns:
+            val = row.get(col, "")
+            if col in {"input", "output", "cache_read", "reasoning", "total", "tokens", "api_calls", "sessions"}:
+                val = fmt_int(val)
+            elif col in {"est_usd", "usd_24h", "projected_monthly_usd"}:
+                val = fmt_usd(val)
+            elif col in {"tokens_per_hour"}:
+                val = fmt_int(round(float(val)))
+            elif col in {"pct"}:
+                val = fmt_float(val, 2) + "%"
+            elif col in {"used", "limit"}:
+                if row.get("unit") == "usd":
+                    val = fmt_usd(val)
+                else:
+                    val = fmt_int(val)
+            elif col in {"hours_left"}:
+                val = fmt_float(val, 1)
+            rendered.append(str(val))
+        table.append(rendered)
+    widths = []
+    for i, col in enumerate(columns):
+        widths.append(max(len(labels[col]), *(len(r[i]) for r in table)))
+    header = "  ".join(labels[col].ljust(widths[i]) for i, col in enumerate(columns))
+    sep = "  ".join("-" * widths[i] for i in range(len(columns)))
+    print(header)
+    print(sep)
+    for rendered in table:
+        print("  ".join(rendered[i].ljust(widths[i]) for i in range(len(columns))))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Hermes token budget reports")
+    parser.add_argument("--state-db", default="~/.hermes/state.db", help="Hermes state.db path")
+    parser.add_argument("--config-dir", default="~/.hermes/token_budgeting", help="Token budgeting config directory")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    status = subparsers.add_parser("status", help="Budget status table")
+    status.add_argument("--period", choices=["daily", "weekly", "monthly"], default="daily")
+
+    finance = subparsers.add_parser("finance", help="Provider/model spend table")
+    finance.add_argument("--period", choices=["daily", "weekly", "monthly", "all"], default="daily")
+    finance.add_argument("--by", choices=["provider", "model", "tier", "source"], default="provider")
+
+    forecast = subparsers.add_parser("forecast", help="Burn-rate forecast")
+    forecast.add_argument("--period", choices=["daily", "weekly", "monthly"], default="daily")
+
+    providers = subparsers.add_parser("providers", help="Provider usage table")
+    providers.add_argument("--period", choices=["daily", "weekly", "monthly", "all"], default="daily")
+
+    models = subparsers.add_parser("models", help="Model usage table")
+    models.add_argument("--period", choices=["daily", "weekly", "monthly", "all"], default="daily")
+
+    tiers = subparsers.add_parser("tiers", help="Tier usage table")
+    tiers.add_argument("--period", choices=["daily", "weekly", "monthly", "all"], default="daily")
+
+    sessions = subparsers.add_parser("sessions", help="Top token-heavy sessions")
+    sessions.add_argument("--period", choices=["daily", "weekly", "monthly", "all"], default="daily")
+    sessions.add_argument("--limit", type=int, default=10)
+
+    budget = subparsers.add_parser("set-budget", help="Set or update a passive budget")
+    budget.add_argument("--scope", required=True, choices=["global", "provider", "model", "tier", "source"])
+    budget.add_argument("--name", default="default")
+    budget.add_argument("--period", required=True, choices=["daily", "weekly", "monthly"])
+    budget.add_argument("--limit-tokens", type=int)
+    budget.add_argument("--limit-usd", type=float)
+
+    subparsers.add_parser("doctor", help="Check local setup")
 
     args = parser.parse_args()
-    ledger = TokenLedger()
+    ledger = TokenLedger(state_db=args.state_db, config_dir=args.config_dir)
 
     if args.command == "status":
-        print(ledger.get_status())
-    elif args.command == "forecast":
-        print(ledger.forecast())
+        print_table(ledger.budget_status(args.period), ["scope", "name", "period", "used", "limit", "unit", "pct", "status"])
     elif args.command == "finance":
-        print(ledger.get_financial_summary())
+        print_table(ledger.summarize(args.period, args.by), ["scope", "sessions", "api_calls", "input", "output", "cache_read", "reasoning", "total", "est_usd"])
+    elif args.command == "forecast":
+        fc = ledger.forecast(args.period)
+        print_table(
+            [
+                {
+                    "scope": "last_24h",
+                    "tokens": fc["tokens_24h"],
+                    "tokens_per_hour": fc["tokens_per_hour"],
+                    "usd_24h": fc["usd_24h"],
+                    "projected_monthly_usd": fc["projected_monthly_usd"],
+                }
+            ],
+            ["scope", "tokens", "tokens_per_hour", "usd_24h", "projected_monthly_usd"],
+        )
+        if fc["exhaustion"]:
+            print()
+            print_table(fc["exhaustion"], ["scope", "name", "period", "used", "limit", "unit", "pct", "status", "hours_left"])
+    elif args.command == "providers":
+        print_table(ledger.summarize(args.period, "provider"), ["scope", "sessions", "api_calls", "input", "output", "cache_read", "reasoning", "total", "est_usd"])
+    elif args.command == "models":
+        print_table(ledger.summarize(args.period, "model"), ["scope", "sessions", "api_calls", "input", "output", "cache_read", "reasoning", "total", "est_usd"])
+    elif args.command == "tiers":
+        print_table(ledger.summarize(args.period, "tier"), ["scope", "sessions", "api_calls", "input", "output", "cache_read", "reasoning", "total", "est_usd"])
+    elif args.command == "sessions":
+        print_table(ledger.top_sessions(args.period, args.limit), ["started", "provider", "model", "source", "api_calls", "tokens", "est_usd", "session_id"])
     elif args.command == "set-budget":
-        ledger.set_budget(args.model, args.period, args.limit)
-        print(f"Budget updated for {args.model} ({args.period}): {args.limit} tokens")
-    else:
-        parser.print_help()
+        ledger.set_budget(args.scope, args.name, args.period, args.limit_tokens, args.limit_usd)
+        print(f"Updated budget: scope={args.scope} name={args.name} period={args.period}")
+    elif args.command == "doctor":
+        rows = [{"check": c, "status": s, "detail": d} for c, s, d in ledger.doctor()]
+        print_table(rows, ["check", "status", "detail"])
+
 
 if __name__ == "__main__":
     main()

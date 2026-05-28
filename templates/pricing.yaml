@@ -1,17 +1,52 @@
 # Token Budgeting Reference Pricing
-# Used as fallbacks for zero-config operation.
-Tiers:
-  default: 2
-  elite: 1
-  utility: 3
+#
+# Hermes records raw token usage in ~/.hermes/state.db. This file maps that raw
+# provider/model usage into estimated USD. Values are per 1M tokens.
+# Keep this conservative and easy to edit; precise billing can be imported later
+# from provider invoices or APIs.
 
-Default_Prices:
-  tier_1: 3.00  # per 1M tokens
-  tier_2: 1.00  # per 1M tokens
-  tier_3: 0.00   # Local/Free
+defaults:
+  input_per_million: 1.00
+  output_per_million: 1.00
+  cache_read_per_million: 0.10
+  reasoning_per_million: 1.00
 
-Provider_Defaults:
-  openrouter: "prepaid"
-  anthropic: "monthly"
-  google: "free-tier"
-  ollama: "local"
+providers:
+  # Local/custom provider defaults to zero-cost unless model overrides are added.
+  custom:
+    input_per_million: 0.00
+    output_per_million: 0.00
+    cache_read_per_million: 0.00
+    reasoning_per_million: 0.00
+  ollama:
+    input_per_million: 0.00
+    output_per_million: 0.00
+    cache_read_per_million: 0.00
+    reasoning_per_million: 0.00
+  openai-codex:
+    input_per_million: 1.00
+    output_per_million: 1.00
+    cache_read_per_million: 0.10
+    reasoning_per_million: 1.00
+  openai:
+    input_per_million: 1.00
+    output_per_million: 1.00
+    cache_read_per_million: 0.10
+    reasoning_per_million: 1.00
+  anthropic:
+    input_per_million: 3.00
+    output_per_million: 15.00
+    cache_read_per_million: 0.30
+    reasoning_per_million: 3.00
+  google:
+    input_per_million: 1.25
+    output_per_million: 5.00
+    cache_read_per_million: 0.10
+    reasoning_per_million: 1.25
+  openrouter:
+    input_per_million: 1.00
+    output_per_million: 1.00
+    cache_read_per_million: 0.10
+    reasoning_per_million: 1.00
+
+models: {}

@@ -1,14 +1,30 @@
 # Model Tier Definitions
-# Tier 1: Elite (High Cost/Quality)
-# Tier 2: Balanced (Mid Cost)
-# Tier 3: Utility (Free/Local)
+#
+# Used for specialist-style budgets: elite / balanced / utility / local.
+# Matching is substring-based and case-insensitive.
 
-Tiers:
-  "gpt-4o": 1
-  "claude-3-5-sonnet": 1
-  "claude-3-opus": 1
-  "gemini-1.5-pro": 2
-  "llama-3.1-405b": 2
-  "gemma4:31b-cloud": 3
-  "ollama": 3
-  "default": 2
+tiers:
+  elite:
+    - gpt-5
+    - gpt-4.5
+    - gpt-4
+    - claude-opus
+    - claude-sonnet
+    - o3
+  balanced:
+    - gemini-pro
+    - gpt-4o-mini
+    - llama-405b
+    - qwen-max
+  utility:
+    - mini
+    - haiku
+    - flash
+    - gemma
+    - llama
+    - qwen
+  local:
+    - ollama
+    - local
+
+default_tier: balanced

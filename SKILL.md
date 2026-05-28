@@ -1,50 +1,162 @@
 ---
 name: token-budgeting
 category: devops
-description: Professional token usage tracking, budgeting, and forecasting. Treats LLM tokens as a corporate currency with daily/weekly/monthly quotas.
-version: 1.0.0
+description: Passive token finance and budget reports over Hermes' built-in state.db usage ledger.
+version: 2.0.0
 author: User & Hermes
 ---
 
 # Token Budgeting Skill
 
-This skill provides a "Token Ledger" for LLM operations. It enables real-time tracking of token consumption, budget enforcement, and burn-rate forecasting using DuckDB and CSV storage.
+Token-budgeting is the finance, governance, and reporting layer for Hermes LLM usage.
 
-## 🎯 Capabilities
-- **Real-time Tracking**: Automatically logs prompt and completion tokens via the `adapter.py` hook.
-- **Budgeting**: Set and monitor limits across different time windows (Daily, Weekly, Monthly).
-- **Forecasting**: Predicts budget exhaustion based on historical burn rates.
-- **Analytics**: High-performance querying of usage patterns using DuckDB.
+Hermes already records raw usage in:
 
-## 🛠️ Components
-
-### 1. Core Ledger (`scripts/ledger.py`)
-The engine that manages `usage.csv` and `budget.csv`. It uses DuckDB to provide analytical views of spending.
-
-### 2. Management CLI (`scripts/cli.py`)
-A standalone tool to manage the treasury.
-- `status`: See actual vs budgeted usage.
-- `forecast`: See tokens/hour burn rate.
-- `set-budget --period <daily|weekly|monthly> --limit <N>`: Update quotas.
-
-### 3. Hermes Adapter (`scripts/adapter.py`)
-The integration layer. It should be called in the `AIAgent` loop to record usage metadata from every LLM response.
-
-## 🚀 Integration Guide
-
-To activate real-time tracking in a Hermes Agent:
-1. Import the adapter: `from skills.token_budgeting.scripts.adapter import token_adapter`
-2. In the main `AIAgent` loop, after the API response:
-   ```python
-   token_adapter.record_response(response, model_name=self.model, session_id=self.session_id)
-   ```
-
-## ⚠️ Pitfalls
-- **CSV Locking**: Because it uses standard CSV appends, extreme high-concurrency (100+ parallel sub-agents) might require a transition to a proper SQLite/DuckDB file. For standard agent use, CSV is optimal for transparency.
-- **Budget Resolution**: Budget is checked against `model` name. If using a generic `default` budget, ensure model names are normalized.
-
-## ✅ Verification
-Run the following to verify the installation:
 ```bash
-python ~/.hermes/skills/token-budgeting/scripts/cli.py status
+~/.hermes/state.db
 ```
+
+This skill treats that SQLite database as the source of truth. It does not duplicate every request into a separate CSV ledger. Its job is to turn Hermes' raw session data into simple, clean tabular reports: budgets, spend, burn rate, provider/model breakdowns, and passive alerts.
+
+## What Hermes Core Owns
+
+Hermes core captures raw session usage in the `sessions` table:
+
+- `model`
+- `billing_provider`
+- `billing_base_url`
+- `billing_mode`
+- `input_tokens`
+- `output_tokens`
+- `cache_read_tokens`
+- `cache_write_tokens`
+- `reasoning_tokens`
+- `api_call_count`
+- `estimated_cost_usd`
+- `actual_cost_usd`
+- `source`
+- `started_at`
+- `ended_at`
+
+Do not reimplement basic token capture in this skill unless Hermes core is unavailable.
+
+## What This Skill Adds
+
+- Budget policy by global/provider/model/tier/source.
+- Clean tabular reports for status, finance, providers, models, tiers, sessions, and forecasts.
+- Pricing normalization for providers and models.
+- Specialist tiering: elite / balanced / utility / local.
+- Burn-rate forecasting: tokens/hour, projected monthly spend, and time-to-budget exhaustion.
+- Passive alert state: OK / WARNING / CRITICAL. The skill reports; it does not hard-block usage.
+- Setup diagnostics via `doctor`.
+
+## Commands
+
+Run from the skill repo or installed skill directory:
+
+```bash
+python3 scripts/cli.py doctor
+python3 scripts/cli.py status
+python3 scripts/cli.py finance --by provider --period daily
+python3 scripts/cli.py finance --by model --period daily
+python3 scripts/cli.py providers --period daily
+python3 scripts/cli.py models --period daily
+python3 scripts/cli.py tiers --period daily
+python3 scripts/cli.py sessions --period daily --limit 10
+python3 scripts/cli.py forecast --period daily
+```
+
+Set budgets:
+
+```bash
+python3 scripts/cli.py set-budget --scope global --name default --period daily --limit-tokens 1000000
+python3 scripts/cli.py set-budget --scope provider --name openai-codex --period daily --limit-usd 5
+python3 scripts/cli.py set-budget --scope tier --name elite --period daily --limit-tokens 500000
+```
+
+Use a non-default Hermes state database:
+
+```bash
+python3 scripts/cli.py --state-db /path/to/state.db status
+```
+
+## Config Files
+
+Runtime config is created under:
+
+```bash
+~/.hermes/token_budgeting/
+```
+
+Files:
+
+- `budgets.yaml`: budget rules and thresholds.
+- `pricing.yaml`: provider/model price estimates per 1M tokens.
+- `model_tiers.yaml`: substring mappings from model names to tiers.
+
+Templates live in this skill repo under `templates/`.
+
+## Report Style
+
+Reports should be terminal-friendly tables: no verbose prose, no charts required, easy to paste into WhatsApp or a terminal.
+
+Important columns:
+
+- scope
+- sessions
+- api_calls
+- input
+- output
+- cache_read
+- reasoning
+- total
+- est_usd
+- pct
+- status
+
+## Architecture
+
+```text
+Hermes core
+  -> ~/.hermes/state.db
+      sessions table with raw token/cost/provider/model data
+
+Token-budgeting skill
+  -> reads state.db
+  -> applies budgets.yaml + pricing.yaml + model_tiers.yaml
+  -> prints clean passive reports
+```
+
+DuckDB is optional for future high-volume analytics. SQLite is enough for the current source-of-truth path.
+
+## Dependencies
+
+Minimum runtime:
+
+```bash
+python3 -m pip install PyYAML
+```
+
+Optional/future analytics:
+
+```bash
+python3 -m pip install duckdb PyYAML
+```
+
+## Redundant Pieces Removed / Deprecated
+
+- `usage.csv` is not the primary ledger.
+- CSV append logging is deprecated.
+- The adapter is retained only as a backward-compatible no-op for old Hermes soft-hook imports.
+- CSV locking concerns are no longer central because Hermes state is SQLite.
+
+## Verification
+
+```bash
+python3 scripts/cli.py doctor
+python3 scripts/cli.py status
+python3 scripts/cli.py providers --period daily
+python3 scripts/cli.py sessions --period daily --limit 5
+```
+
+Expected: simple tables, no tracebacks.
